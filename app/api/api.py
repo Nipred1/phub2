@@ -1,6 +1,7 @@
 from fastapi import APIRouter, File, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
+from app.auth import RoleChecker
 
 import sys
 from pathlib import Path
@@ -9,7 +10,6 @@ from app.database import Base
 from typing import Optional
 from fastapi.responses import StreamingResponse
 from urllib.parse import quote
-import logging
 
 
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status
@@ -42,8 +42,8 @@ from app.crud import (
 
 MAX_PROJECT_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1 ГБ
 router = APIRouter()
-logger = logging.getLogger("uvicorn")
-logger.setLevel(logging.INFO)
+
+
 
 # --- Пользователи ---
 
@@ -141,7 +141,11 @@ def read_projects(
 
 
 @router.post("/projects/", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
-def create_new_project(project: ProjectCreate, db: Session = Depends(get_db)):
+def create_new_project(
+    project: ProjectCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(RoleChecker(["админ"]))  # Разрешено только admin
+):
     return create_project(db, project)
 
 @router.get("/projects/", response_model=List[ProjectRead])

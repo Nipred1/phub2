@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -12,6 +12,9 @@ from app.schemas import UserCreate, UserRead
 from app.crud import get_user_by_email, create_user
 from app.database import get_db
 
+from fastapi import Depends
+from fastapi.security import OAuth2PasswordBearer
+
 # Конфигурация
 SECRET_KEY = "ВАШ_СЕКРЕТНЫЙ_КЛЮЧ_ЗДЕСЬ"
 ALGORITHM = "HS256"
@@ -21,6 +24,22 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+def RoleChecker(required_roles: List[str]):
+    def role_checker(current_user: User = Depends(get_current_user)):
+        if current_user.role not in required_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Отказано в доступе: недостаточно прав"
+            )
+        return current_user
+    return role_checker
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/auth/token")
+
+@router.get("/users/me")
+async def read_users_me(token: str = Depends(oauth2_scheme)):
+    return {"token": token}
 
 # Хеширование пароля
 def verify_password(plain_password, hashed_password):
