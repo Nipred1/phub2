@@ -12,11 +12,18 @@ DATABASE_URL = (
     "?client_encoding=utf8"
 )
 
-# Создаем движок SQLAlchemy
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True  # Проверка соединения перед использованием
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800,
+    connect_args={
+        "connect_timeout": 10,
+    }
 )
+
 
 # Создаем сессию
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
