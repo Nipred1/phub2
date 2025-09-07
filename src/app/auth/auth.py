@@ -37,10 +37,6 @@ def RoleChecker(required_roles: List[str]):
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/auth/token")
 
-@router.get("/users/me")
-async def read_users_me(token: str = Depends(oauth2_scheme)):
-    return {"token": token}
-
 # Хеширование пароля
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -83,6 +79,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     if user is None:
         raise credentials_exception
     return user
+
+@router.get("/users/me", response_model=UserRead)
+async def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user
 
 # Эндпоинт для регистрации
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
