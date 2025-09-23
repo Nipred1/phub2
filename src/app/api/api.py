@@ -79,7 +79,90 @@ from typing import Optional, List
 from sqlalchemy.orm import Session
 from app.crud import get_projects_filtered
 from app.schemas import ProjectRead
+from sqlalchemy import or_, and_
+from sqlalchemy.sql import func
+from typing import List, Optional
 
+
+@router.get("/projects/search_by_all", response_model=List[ProjectRead])
+def read_projects(
+        search: Optional[str] = Query(None, description="Поиск по названию и описанию"),
+        keywords: Optional[str] = Query(None, description="Ключевые слова для поиска в тегах (разделенные запятой)"),
+        keyword_match: str = Query("any", description="Тип совпадения: 'any' (любое слово) или 'all' (все слова)"),
+        status: Optional[str] = Query(None, description="Статус проекта"),
+        subject_area_id: Optional[int] = Query(None, description="ID предметной области"),
+        is_public: Optional[bool] = Query(None, description="Публичный проект"),
+        skip: int = Query(0, ge=0, description="Пропустить N записей"),
+        limit: int = Query(100, ge=1, le=1000, description="Максимум записей"),
+        db: Session = Depends(get_db)
+):
+    try:
+        query = db.query(Project)
+
+        # Поиск по названию и описанию
+        if search:
+            search = search.strip()
+            if search:
+                search_filter = or_(
+                    Project.title.ilike(f"%{search}%"),
+                    Project.description.ilike(f"%{search}%")
+                )
+                query = query.filter(search_filter)
+
+        # Поиск по ключевым словам в тегах
+        if keywords:
+            keywords = keywords.strip()
+            if keywords:
+                keyword_list = [k.strip().lower() for k in keywords.split(',') if k.strip()]
+
+                if keyword_match == "all":
+                    # Ищем проекты, которые содержат ВСЕ указанные ключевые слова
+                    conditions = []
+                    for keyword in keyword_list:
+                        conditions.append(
+                            func.jsonb_path_exists(
+                                Project.keywords,
+                                f'$[*] ? (@ like_regex "{keyword}" flag "i")'
+                            )
+                        )
+                    query = query.filter(and_(*conditions))
+                else:
+                    # Ищем проекты, которые содержат ЛЮБОЕ из указанных ключевых слов
+                    conditions = []
+                    for keyword in keyword_list:
+                        conditions.append(
+                            func.jsonb_path_exists(
+                                Project.keywords,
+                                f'$[*] ? (@ like_regex "{keyword}" flag "i")'
+                            )
+                        )
+                    query = query.filter(or_(*conditions))
+
+        # Фильтрация по статусу
+        if status:
+            query = query.filter(Project.status == status)
+
+        # Фильтрация по предметной области
+        if subject_area_id:
+            query = query.filter(Project.subject_area_id == subject_area_id)
+
+        # Фильтрация по публичности
+        if is_public is not None:
+            query = query.filter(Project.is_public == is_public)
+
+        # Применяем пагинацию
+        query = query.offset(skip).limit(limit)
+
+        # Выполняем запрос
+        projects = query.all()
+
+        return projects
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка при поиске проектов: {str(e)}"
+        )
 
 @router.get("/projects/search_by_keyword", response_model=List[ProjectRead])
 def search_projects_by_partial_keyword(
