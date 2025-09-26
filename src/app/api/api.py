@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session
 from app.minio_client import upload_file, download_file, update_file_with_rename
 from app.database import get_db
 from sqlalchemy import func
+from app.auth import get_current_user
 
-from app.models import User, Project, ProjectFile
+from app.models import User, Project, ProjectFile, TeamMember
 # Report
 # ReportCreate, ReportRead
 from app.schemas import (
@@ -84,8 +85,18 @@ from sqlalchemy.sql import func
 from typing import List, Optional
 
 
+def filter_projects_for_user(query, current_user, db):
+    if current_user.role != "админ":
+        subquery = db.query(TeamMember.project_id).filter(TeamMember.user_id == current_user.id).subquery()
+        query = query.filter(
+            (Project.is_public == True) |
+            (Project.id.in_(subquery))
+        )
+    return query
+
+
 @router.get("/projects/search_by_all", response_model=List[ProjectRead])
-def read_projects(
+def read_projects_search_by_all(
         search: Optional[str] = Query(None, description="Поиск по названию и описанию"),
         keywords: Optional[str] = Query(None, description="Ключевые слова для поиска в тегах (разделенные запятой)"),
         keyword_match: str = Query("any", description="Тип совпадения: 'any' (любое слово) или 'all' (все слова)"),
@@ -94,6 +105,7 @@ def read_projects(
         is_public: Optional[bool] = Query(None, description="Публичный проект"),
         skip: int = Query(0, ge=0, description="Пропустить N записей"),
         limit: int = Query(100, ge=1, le=1000, description="Максимум записей"),
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     try:
@@ -116,7 +128,7 @@ def read_projects(
                 keyword_list = [k.strip().lower() for k in keywords.split(',') if k.strip()]
 
                 if keyword_match == "all":
-                    # Ищем проекты, которые содержат ВСЕ указанные ключевые слова
+                    # Проекты с ВСЕМИ ключевыми словами
                     conditions = []
                     for keyword in keyword_list:
                         conditions.append(
@@ -127,7 +139,7 @@ def read_projects(
                         )
                     query = query.filter(and_(*conditions))
                 else:
-                    # Ищем проекты, которые содержат ЛЮБОЕ из указанных ключевых слов
+                    # Проекты с ЛЮБЫМИ ключевыми словами
                     conditions = []
                     for keyword in keyword_list:
                         conditions.append(
@@ -146,14 +158,22 @@ def read_projects(
         if subject_area_id:
             query = query.filter(Project.subject_area_id == subject_area_id)
 
-        # Фильтрация по публичности
+        # Фильтрация по публичности (если явно указан аргумент)
         if is_public is not None:
             query = query.filter(Project.is_public == is_public)
 
-        # Применяем пагинацию
+        # Ограничение приватных проектов по роли пользователя
+        if current_user.role != "админ":
+            # Подзапрос на проекты, где пользователь состоит в команде
+            subquery = db.query(TeamMember.project_id).filter(TeamMember.user_id == current_user.id).subquery()
+            query = query.filter(
+                (Project.is_public == True) |
+                (Project.id.in_(subquery))
+            )
+
+        # Пагинация
         query = query.offset(skip).limit(limit)
 
-        # Выполняем запрос
         projects = query.all()
 
         return projects
@@ -164,57 +184,6 @@ def read_projects(
             detail=f"Ошибка при поиске проектов: {str(e)}"
         )
 
-@router.get("/projects/search_by_keyword", response_model=List[ProjectRead])
-def search_projects_by_partial_keyword(
-        keyword: str = Query(..., min_length=1, description="Ключевое слово для поиска"),
-        db: Session = Depends(get_db)
-):
-    try:
-        keyword = keyword.strip().lower()
-
-        results = db.query(Project).filter(
-            func.jsonb_path_exists(
-                Project.keywords,
-                f'$[*] ? (@ like_regex "{keyword}" flag "i")'
-            )
-        ).all()
-
-        if not results:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Проекты по ключевому слову '{keyword}' не найдены"
-            )
-
-        return results
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Ошибка при поиске проектов: {str(e)}"
-        )
-
-@router.get("/projects_fil/", response_model=List[ProjectRead])
-def read_projects(
-    search: Optional[str] = Query(None, description="Поиск по названию и описанию"),
-    status: Optional[str] = Query(None, description="Статус проекта"),
-    subject_area_id: Optional[int] = Query(None, description="ID предметной области"),
-    is_public: Optional[bool] = Query(None, description="Публичный проект"),
-    skip: int = Query(0, ge=0, description="Пропустить N записей"),
-    limit: int = Query(100, ge=1, le=1000, description="Максимум записей"),
-    db: Session = Depends(get_db)
-):
-    projects = get_projects_filtered(
-        db=db,
-        search=search,
-        status=status,
-        subject_area_id=subject_area_id,
-        is_public=is_public,
-        skip=skip,
-        limit=limit
-    )
-    return projects
-
-
 @router.post("/projects/", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
 def create_new_project(
     project: ProjectCreate,
@@ -224,14 +193,45 @@ def create_new_project(
     return create_project(db, project)
 
 @router.get("/projects/", response_model=List[ProjectRead])
-def read_projects(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return get_projects(db, skip=skip, limit=limit)
+def read_projects(
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    query = db.query(Project)
+
+    if current_user.role != "админ":
+        # Пользователь - не админ, фильтруем только публичные проекты или проекты, в которых он есть
+        subquery = db.query(TeamMember.project_id).filter(TeamMember.user_id == current_user.id).subquery()
+
+        query = query.filter(
+            (Project.is_public == True) |
+            (Project.id.in_(subquery))
+        )
+
+    projects = query.offset(skip).limit(limit).all()
+    return projects
 
 @router.get("/projects/{project_id}", response_model=ProjectRead)
-def read_project(project_id: int, db: Session = Depends(get_db)):
+def read_project(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     project = get_project(db, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Проект не найден")
+
+    if (not project.is_public and current_user.role != "админ"):
+        # Проверяем, состоит ли пользователь в команде проекта
+        member = db.query(TeamMember).filter(
+            TeamMember.project_id == project_id,
+            TeamMember.user_id == current_user.id
+        ).first()
+        if not member:
+            raise HTTPException(status_code=403, detail="Доступ запрещён")
+
     return project
 
 @router.put("/projects/{project_id}", response_model=ProjectRead)
