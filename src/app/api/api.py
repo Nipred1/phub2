@@ -310,8 +310,112 @@ def remove_project_connection(project_id: int, related_project_id: int, db: Sess
 
 # --- Участники команд ---
 
+# Иерархия ролей в команде (от высшей к низшей)
+TEAM_ROLE_HIERARCHY = {
+    "куратор": 2,
+    "ответственный": 1,
+    "участник": 0
+}
+
+
+def check_team_management_permission(
+        db: Session,
+        current_user: User,
+        project_id: int = None,
+        target_team_member_id: int = None,
+        action: str = "create",
+        new_role: str = None
+) -> bool:
+    """Проверяет права доступа для управления участниками команды"""
+
+    # Админ может всё (независимо от роли в проекте)
+    if current_user.role == "админ":
+        return True
+
+    # Для операции удаления проверяем особый случай - самоудаление
+    if action == "delete" and target_team_member_id:
+        # Получаем удаляемого участника
+        target_member = db.query(TeamMember).filter(
+            TeamMember.id == target_team_member_id
+        ).first()
+
+        if target_member and target_member.user_id == current_user.id:
+            # ЛЮБОЙ участник может удалить СЕБЯ из проекта
+            return True
+
+    # Для всех остальных проверяем членство в проекте
+    user_membership = db.query(TeamMember).filter(
+        TeamMember.project_id == project_id,
+        TeamMember.user_id == current_user.id
+    ).first()
+
+    if not user_membership:
+        return False  # Не участник проекта - нет прав
+
+    user_team_role = user_membership.role
+
+    # Куратор проекта может почти всё, кроме назначения других кураторов
+    if user_team_role == "куратор":
+        if action in ["create", "update"] and new_role:
+            if new_role == "куратор":
+                return False
+        return action in ["create", "read", "update", "delete"]
+
+    # Ответственный имеет ограничения
+    if user_team_role == "ответственный":
+        if action == "delete" and target_team_member_id:
+            target_member = db.query(TeamMember).filter(
+                TeamMember.id == target_team_member_id
+            ).first()
+            if target_member:
+                target_role = target_member.role
+                if target_role == "куратор" and target_member.user_id != current_user.id:
+                    return False
+                if (target_role == "ответственный" and
+                        target_member.user_id != current_user.id):
+                    return False
+
+        if action in ["create", "update"] and new_role:
+            if new_role in ["куратор", "ответственный"]:
+                if action == "update" and target_team_member_id:
+                    target_member = db.query(TeamMember).filter(
+                        TeamMember.id == target_team_member_id
+                    ).first()
+                    if target_member and target_member.role == "ответственный":
+                        return new_role == "участник"
+                return False
+
+        return action in ["create", "read", "update", "delete"]
+
+    return False
+
 @router.post("/team_members/", response_model=TeamMemberRead, status_code=status.HTTP_201_CREATED)
-def create_new_team_member(tm: TeamMemberCreate, db: Session = Depends(get_db)):
+def create_new_team_member(
+        tm: TeamMemberCreate,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
+):
+    # Проверяем права доступа
+    if not check_team_management_permission(
+            db, current_user, tm.project_id, action="create", new_role=tm.role
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для добавления участника"
+        )
+
+    # Проверяем, не является ли пользователь уже участником проекта
+    existing_member = db.query(TeamMember).filter(
+        TeamMember.project_id == tm.project_id,
+        TeamMember.user_id == tm.user_id
+    ).first()
+
+    if existing_member:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Пользователь уже является участником этого проекта"
+        )
+
     return create_team_member(db, tm)
 
 @router.get("/team_members/", response_model=List[TeamMemberRead])
@@ -325,15 +429,76 @@ def read_team_member(team_member_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Участник команды не найден")
     return tm
 
+
 @router.put("/team_members/{team_member_id}", response_model=TeamMemberRead)
-def update_existing_team_member(team_member_id: int, tm_data: TeamMemberCreate, db: Session = Depends(get_db)):
+def update_existing_team_member(
+        team_member_id: int,
+        tm_data: TeamMemberCreate,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
+):
+    # Получаем текущую запись участника
+    existing_tm = get_team_member(db, team_member_id)
+    if not existing_tm:
+        raise HTTPException(status_code=404, detail="Участник команды не найден")
+
+    # Проверяем права доступа
+    if not check_team_management_permission(
+            db, current_user, existing_tm.project_id, team_member_id, "update", tm_data.role
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для изменения участника"
+        )
+
+    # Дополнительная проверка для ответственных
+    if current_user.role != "админ":
+        user_membership = db.query(TeamMember).filter(
+            TeamMember.project_id == existing_tm.project_id,
+            TeamMember.user_id == current_user.id
+        ).first()
+
+        if user_membership and user_membership.role == "ответственный":
+            # Ответственный не может изменять кураторов
+            if existing_tm.role == "куратор":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Ответственный не может изменять кураторов"
+                )
+            # Ответственный не может назначать роль куратора
+            if tm_data.role == "куратор":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Ответственный не может назначать роль куратора"
+                )
+
     tm = update_team_member(db, team_member_id, tm_data.dict(exclude_unset=True))
     return tm
 
+
 @router.delete("/team_members/{team_member_id}", status_code=status.HTTP_204_NO_CONTENT)
-def remove_team_member(team_member_id: int, db: Session = Depends(get_db)):
+def remove_team_member(
+        team_member_id: int,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
+):
+    # Получаем участника для проверки прав
+    tm = get_team_member(db, team_member_id)
+    if not tm:
+        raise HTTPException(status_code=404, detail="Участник команды не найден")
+
+    # Проверяем права доступа
+    if not check_team_management_permission(
+            db, current_user, tm.project_id, team_member_id, "delete"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для удаления участника"
+        )
+
     delete_team_member(db, team_member_id)
     return None
+
 
 # --- Файлы проектов ---
 
