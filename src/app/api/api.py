@@ -171,6 +171,9 @@ def read_projects_search_by_all(
                 (Project.id.in_(subquery))
             )
 
+        # Сортировка по дате создания (самые новые сверху)
+        query = query.order_by(Project.created_at.desc())
+
         # Пагинация
         query = query.offset(skip).limit(limit)
 
