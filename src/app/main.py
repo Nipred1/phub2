@@ -18,7 +18,6 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(api_router, prefix="/api", tags=["api"])
 
-# Пример корневого эндпоинта
 @app.get("/")
 def root():
     return {"message": "Добро пожаловать в систему управления проектами"}

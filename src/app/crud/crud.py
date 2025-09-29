@@ -495,12 +495,9 @@ def get_project_connection(db: Session, project_id: int, related_project_id: int
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Ошибка операции: {str(e)}") from e
 
-def get_project_connections(db: Session, project_id: int) -> List[ProjectConnection]:
+def get_project_connections(db: Session) -> List[ProjectConnection]:
     try:
-        return db.query(ProjectConnection).filter(ProjectConnection.project_id == project_id).all()
-    except HTTPException:
-        db.rollback()
-        raise
+        return db.query(ProjectConnection).all()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Ошибка операции: {str(e)}") from e
