@@ -299,6 +299,11 @@ def remove_subject_area(subject_area_id: int, db: Session = Depends(get_db)):
 def create_new_project_connection(pc: ProjectConnectionCreate, db: Session = Depends(get_db)):
     return create_project_connection(db, pc)
 
+@router.get("/project_connections/", response_model=List[ProjectConnectionRead])
+def read_project_connections(db: Session = Depends(get_db)):
+    connections = get_project_connections(db)
+    return connections
+
 @router.get("/project_connections/{project_id}", response_model=List[ProjectConnectionRead])
 def read_project_connections(project_id: int, db: Session = Depends(get_db)):
     return get_project_connections(db, project_id)
