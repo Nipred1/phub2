@@ -1,5 +1,6 @@
 from typing import List
 from app.auth import RoleChecker
+from sqlalchemy import exists
 
 from typing import Optional
 from fastapi.responses import StreamingResponse
@@ -514,9 +515,117 @@ def remove_team_member(
 def create_new_project_file(pf: ProjectFileCreate, db: Session = Depends(get_db)):
     return create_project_file(db, pf)
 
+
 @router.get("/project_files/", response_model=List[ProjectFileRead])
-def read_project_files(project_id: int = None, db: Session = Depends(get_db)):
-    return get_project_files(db, project_id)
+def read_project_files(
+        project_id: int = None,
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user)
+):
+    """
+    Получить список файлов проекта
+    - Админы видят все файлы
+    - Участники проекта видят все файлы своего проекта
+    - Остальные видят только публичные файлы
+    """
+
+    # Если project_id не указан - возвращаем файлы из всех доступных проектов
+    if project_id is None:
+        if current_user.role == "админ":
+            # Админы видят все файлы
+            return get_project_files(db, project_id)
+        else:
+            # Для обычных пользователей получаем файлы из доступных проектов
+            accessible_projects_query = db.query(Project.id).filter(
+                or_(
+                    Project.is_public == True,
+                    exists().where(
+                        (TeamMember.project_id == Project.id) &
+                        (TeamMember.user_id == current_user.id)
+                    )
+                )
+            )
+
+            project_files = db.query(ProjectFile).filter(
+                ProjectFile.project_id.in_(accessible_projects_query)
+            ).all()
+            return project_files
+
+    # Если project_id указан - проверяем доступ к конкретному проекту
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Проект не найден")
+
+    # Проверяем доступ пользователя к проекту
+    has_access = False
+    if current_user.role == "админ":
+        has_access = True
+    elif project.is_public:
+        has_access = True
+    else:
+        # Проверяем, является ли пользователь участником проекта
+        team_member = db.query(TeamMember).filter(
+            TeamMember.project_id == project_id,
+            TeamMember.user_id == current_user.id
+        ).first()
+        has_access = team_member is not None
+
+    if not has_access:
+        raise HTTPException(
+            status_code=403,
+            detail="Доступ к файлам проекта запрещен"
+        )
+
+    # Если доступ есть, возвращаем файлы
+    # Для не-админов фильтруем приватные файлы
+    query = db.query(ProjectFile).filter(ProjectFile.project_id == project_id)
+
+    if current_user.role != "админ":
+        query = query.filter(
+            or_(
+                ProjectFile.is_public == True,
+                ProjectFile.uploaded_by == current_user.id  # Свои файлы всегда видны
+            )
+        )
+
+    return query.all()
+
+
+# Вспомогательная функция для проверки доступа к файлу
+def has_file_access(db: Session, file_id: int, user: User) -> bool:
+    """Проверяет, имеет ли пользователь доступ к файлу"""
+
+    file = db.query(ProjectFile).filter(ProjectFile.id == file_id).first()
+    if not file:
+        return False
+
+    # Админы имеют доступ ко всем файлам
+    if user.role == "админ":
+        return True
+
+    # Пользователь всегда видит свои файлы
+    if file.uploaded_by == user.id:
+        return True
+
+    # Для публичных файлов проверяем доступ к проекту
+    if file.is_public:
+        project = db.query(Project).filter(Project.id == file.project_id).first()
+        if project and project.is_public:
+            return True
+        # Если проект приватный, проверяем членство
+        team_member = db.query(TeamMember).filter(
+            TeamMember.project_id == file.project_id,
+            TeamMember.user_id == user.id
+        ).first()
+        return team_member is not None
+
+    # Для приватных файлов проверяем членство в проекте
+    team_member = db.query(TeamMember).filter(
+        TeamMember.project_id == file.project_id,
+        TeamMember.user_id == user.id
+    ).first()
+
+    return team_member is not None
 
 @router.get("/project_files/{file_id}", response_model=ProjectFileRead)
 def read_project_file(file_id: int, db: Session = Depends(get_db)):
