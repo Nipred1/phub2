@@ -15,8 +15,20 @@ from app.database import get_db
 from fastapi import Depends
 from fastapi.security import OAuth2PasswordBearer
 
+import secrets
+import base64
+
+
+def generate_secret_key(length=32):  # 32 bytes = 256 bits
+    """Генерирует криптографически надежный секретный ключ."""
+    random_bytes = secrets.token_bytes(length)
+    secret_key = base64.b64encode(random_bytes).decode('utf-8')  # Кодируем в base64 для удобства хранения
+    return secret_key
+
+
+
 # Конфигурация
-SECRET_KEY = "ВАШ_СЕКРЕТНЫЙ_КЛЮЧ_ЗДЕСЬ"
+SECRET_KEY = generate_secret_key()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 365
 
